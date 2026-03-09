@@ -1,0 +1,16 @@
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.so
+.DS_Store
+run_databricks_tests*.py
+run_databricks_tests*.py
+ic_test_notebook.py
