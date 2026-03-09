@@ -9,17 +9,83 @@ import scipy.optimize
 from ._utils import validate_inputs
 
 
-def _get_isotonic() -> callable:
-    """Return the isotonic regression solver, preferring scipy >= 1.12."""
+def _pava(y: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Pool Adjacent Violators Algorithm (PAVA) for weighted isotonic regression.
+
+    Solves the weighted least-squares isotonic regression problem::
+
+        argmin_m sum_i w_i * (y_i - m_i)^2  subject to  m_1 <= m_2 <= ... <= m_n
+
+    This is a pure numpy implementation requiring only numpy. No scipy >= 1.12
+    or scikit-learn required. Runtime is O(n) amortised.
+
+    Parameters
+    ----------
+    y
+        Target values, already sorted by the predictor. Shape (n,).
+    w
+        Non-negative weights. Shape (n,).
+
+    Returns
+    -------
+    np.ndarray
+        Isotonically non-decreasing fitted values. Same shape as y.
+    """
+    n = len(y)
+    # Each block stores (sum_w, sum_wy) — weighted mean = sum_wy / sum_w
+    sum_w = w.copy().astype(np.float64)
+    sum_wy = (w * y).astype(np.float64)
+    # Block boundaries: block_end[i] = end index (exclusive) of block i
+    # We track blocks as a stack
+    block_start = list(range(n))  # start index of each block
+    block_sw = list(sum_w)        # sum of weights in block
+    block_swy = list(sum_wy)      # sum of w*y in block
+
+    i = 1
+    while i < len(block_start):
+        mean_prev = block_swy[i - 1] / block_sw[i - 1]
+        mean_curr = block_swy[i] / block_sw[i]
+        if mean_prev > mean_curr:
+            # Merge block i into block i-1
+            block_sw[i - 1] += block_sw[i]
+            block_swy[i - 1] += block_swy[i]
+            del block_start[i]
+            del block_sw[i]
+            del block_swy[i]
+            # Check if merged block violates constraint with previous block
+            if i > 1:
+                i -= 1
+        else:
+            i += 1
+
+    # Expand blocks back to per-observation values
+    result = np.empty(n, dtype=np.float64)
+    pos = 0
+    for k in range(len(block_start)):
+        start = block_start[k]
+        end = block_start[k + 1] if k + 1 < len(block_start) else n
+        mean_val = block_swy[k] / block_sw[k]
+        result[start:end] = mean_val
+    return result
+
+
+def _get_isotonic():
+    """Return the best available isotonic regression solver.
+
+    Preference order:
+    1. scipy.stats.isotonic_regression (scipy >= 1.12) — fastest
+    2. sklearn.isotonic.IsotonicRegression — widely available
+    3. _pava — pure numpy fallback, always works
+    """
     try:
         from scipy.stats import isotonic_regression as _scipy_iso
 
-        def _solve(y: np.ndarray, w: np.ndarray) -> np.ndarray:
+        def _solve_scipy(y: np.ndarray, w: np.ndarray) -> np.ndarray:
             result = _scipy_iso(y, weights=w, increasing=True)
             return np.asarray(result.x, dtype=np.float64)
 
-        return _solve
-    except ImportError:
+        return _solve_scipy
+    except (ImportError, AttributeError):
         pass
 
     try:
@@ -31,12 +97,11 @@ def _get_isotonic() -> callable:
             return ir.fit_transform(x, y, sample_weight=w)
 
         return _solve_sk
-    except ImportError:
-        raise ImportError(
-            "Isotonic regression requires scipy >= 1.12 "
-            "(scipy.stats.isotonic_regression) or scikit-learn. "
-            "Install with: pip install 'scipy>=1.12'"
-        )
+    except (ImportError, AttributeError):
+        pass
+
+    # Pure numpy PAVA — always available
+    return _pava
 
 
 def isotonic_recalibrate(
@@ -86,7 +151,7 @@ def isotonic_recalibrate(
     _iso = _get_isotonic()
 
     # Sort by prediction to apply isotonic regression in the right order
-    sort_idx = np.argsort(y_hat_arr)
+    sort_idx = np.argsort(y_hat_arr, kind="stable")
     y_sorted = y_arr[sort_idx]
     w_sorted = w[sort_idx]
 
@@ -95,7 +160,7 @@ def isotonic_recalibrate(
 
     # Count distinct levels (isotonic steps)
     diffs = np.diff(fitted_sorted)
-    n_steps = int(np.sum(diffs != 0)) + 1
+    n_steps = int(np.sum(np.abs(diffs) > 1e-12)) + 1
     check_isotonic_complexity(n_steps, n)
 
     # Map back to original observation order
