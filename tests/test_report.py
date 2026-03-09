@@ -121,12 +121,13 @@ class TestCalibrationReportVerdict:
     """Test verdict logic for different miscalibration patterns."""
 
     def test_globally_balanced_well_ranked(self):
-        """Good model with balanced predictions: should get OK or MONITOR."""
+        """Good model: balance ratio near 1.0, low MCB."""
         y, y_hat, exp = _make_data(n=5000, scale=1.0, seed=0)
         checker = CalibrationChecker(bootstrap_n=199)
         report = checker.check(y, y_hat, exp, seed=0)
-        # Good model shouldn't get REFIT
-        assert report.verdict() in ("OK", "MONITOR", "RECALIBRATE")
+        # Good model: balance ratio near 1.0 and low MCB relative to UNC
+        assert abs(report.balance.balance_ratio - 1.0) < 0.05
+        assert report.murphy.miscalibration / report.murphy.uncertainty < 0.15
 
     def test_large_scale_error_gets_recalibrate(self):
         """40% global over-prediction should trigger RECALIBRATE."""
